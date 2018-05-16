@@ -3,8 +3,12 @@ package com.example.demo;
 import com.example.demo.server.DemoServer;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.concurrent.FutureCallback;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.impl.nio.client.CloseableHttpAsyncClient;
 import org.apache.http.impl.nio.client.HttpAsyncClients;
 import org.apache.http.impl.nio.conn.PoolingNHttpClientConnectionManager;
@@ -12,6 +16,7 @@ import org.apache.http.impl.nio.reactor.DefaultConnectingIOReactor;
 import org.apache.http.impl.nio.reactor.IOReactorConfig;
 import org.apache.http.nio.reactor.IOReactorException;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -31,10 +36,26 @@ public class DemoClient {
 
         TimeUnit.SECONDS.sleep(10); // should be enough for the Spring Boot app to start
 
-        Map<String, CloseableHttpAsyncClient> clients = new HashMap<>();
+        testClients();
+        testAsyncClents();
+    }
+
+    private static void testAsyncClents() throws IOReactorException {
+        Map<String, CloseableHttpAsyncClient> asyncClients = new HashMap<>();
+        asyncClients.put("AsyncClient: default", defaultAsyncClient());
+        asyncClients.put("AsyncClient: customCM, default ioReactor", customCM_defaultReactorAsyncClient());
+        asyncClients.put("AsyncClient: customCM, custom ioReactor", customCM_customReactorAsyncClient());
+
+        asyncClients.forEach((k, v) -> {
+            invoke(k, v, "Post: no timeout", post());
+            invoke(k, v, "Post: with timeout", postWithTimeout());
+        });
+    }
+
+    private static void testClients() throws IOReactorException {
+        Map<String, CloseableHttpClient> clients = new HashMap<>();
         clients.put("Client: default", defaultClient());
-        clients.put("Client: customCM, default ioReactor", customCM_defaultReactorClient());
-        clients.put("Client: customCM, custom ioReactor", customCM_customReactorClient());
+        clients.put("Client: customCM", customCMClient());
 
         clients.forEach((k, v) -> {
             invoke(k, v, "Post: no timeout", post());
@@ -42,11 +63,24 @@ public class DemoClient {
         });
     }
 
-    private static CloseableHttpAsyncClient defaultClient() {
+    private static CloseableHttpClient defaultClient() {
+        return HttpClients.createDefault();
+    }
+
+    private static CloseableHttpAsyncClient defaultAsyncClient() {
         return HttpAsyncClients.createDefault();
     }
 
-    private static CloseableHttpAsyncClient customCM_defaultReactorClient() throws IOReactorException {
+    private static CloseableHttpClient customCMClient() throws IOReactorException {
+        DefaultConnectingIOReactor ioReactor = new DefaultConnectingIOReactor();
+        PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager();
+
+        return HttpClients.custom()
+                          .setConnectionManager(connectionManager)
+                          .build();
+    }
+
+    private static CloseableHttpAsyncClient customCM_defaultReactorAsyncClient() throws IOReactorException {
         DefaultConnectingIOReactor ioReactor = new DefaultConnectingIOReactor();
         PoolingNHttpClientConnectionManager connectionManager = new PoolingNHttpClientConnectionManager(ioReactor);
 
@@ -55,7 +89,7 @@ public class DemoClient {
                                .build();
     }
 
-    private static CloseableHttpAsyncClient customCM_customReactorClient() throws IOReactorException {
+    private static CloseableHttpAsyncClient customCM_customReactorAsyncClient() throws IOReactorException {
         IOReactorConfig ioReactorConfig = IOReactorConfig.custom()
                                                          .setSelectInterval(100)
                                                          .setConnectTimeout(1000)
@@ -73,10 +107,25 @@ public class DemoClient {
         server.start();
     }
 
+    private static void invoke(String clientName, CloseableHttpClient httpClient, String postName, HttpPost post) {
+        int i = counter.incrementAndGet();
+        System.out.println("Started " + i + " requests");
+        String name = postName + " | " + clientName ;
+        new Thread(() -> {
+            long start = System.currentTimeMillis();
+            try {
+                CloseableHttpResponse response = httpClient.execute(post);
+                print(name, "completed", start, response);
+            } catch (IOException e) {
+                print(name, "failed", start, e);
+            }
+        }).start();
+    }
+
     private static void invoke(String clientName, CloseableHttpAsyncClient httpAsyncClient, String postName, HttpPost post) {
         int i = counter.incrementAndGet();
         System.out.println("Started " + i + " requests");
-        String name = clientName + " | " + postName;
+        String name = postName + " | " + clientName ;
         new Thread(() -> {
             httpAsyncClient.start();
             httpAsyncClient.execute(post, callback(name));
@@ -98,20 +147,20 @@ public class DemoClient {
         return request;
     }
 
+    private static void print(String name, String status, long start, Object... details) {
+        System.out.println(name + " " + status + " after "
+                                   + (System.currentTimeMillis() - start)
+                                   + " msec");
+        if (details.length > 0) {
+            System.out.println("Details: " + Arrays.asList(details));
+        }
+        System.out.println();
+    }
+
     private static FutureCallback<HttpResponse> callback(String name) {
         return new FutureCallback<HttpResponse>() {
 
             long start = System.currentTimeMillis();
-
-            private void print(String status, long start, Object... details) {
-                System.out.println(name + " " + status + " after "
-                                           + (System.currentTimeMillis() - start)
-                                           + " msec");
-                if (details.length > 0) {
-                    System.out.println("Details: " + Arrays.asList(details));
-                }
-                System.out.println();
-            }
 
             private void maybeExit() {
                 int i = counter.decrementAndGet();
@@ -124,19 +173,19 @@ public class DemoClient {
 
             @Override
             public void completed(HttpResponse result) {
-                print("completed", start, result);
+                print(name, "completed", start, result);
                 maybeExit();
             }
 
             @Override
             public void failed(Exception ex) {
-                print("failed", start, ex);
+                print(name, "failed", start, ex);
                 maybeExit();
             }
 
             @Override
             public void cancelled() {
-                print("cancelled", start);
+                print(name, "cancelled", start);
                 maybeExit();
             }
         };
