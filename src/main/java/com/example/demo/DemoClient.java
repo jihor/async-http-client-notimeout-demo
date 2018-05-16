@@ -2,20 +2,19 @@ package com.example.demo;
 
 import com.example.demo.server.DemoServer;
 import org.apache.http.HttpResponse;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpPost;
-import org.apache.http.client.utils.URIBuilder;
 import org.apache.http.concurrent.FutureCallback;
 import org.apache.http.impl.nio.client.CloseableHttpAsyncClient;
 import org.apache.http.impl.nio.client.HttpAsyncClients;
 import org.apache.http.impl.nio.conn.PoolingNHttpClientConnectionManager;
 import org.apache.http.impl.nio.reactor.DefaultConnectingIOReactor;
 import org.apache.http.impl.nio.reactor.IOReactorConfig;
-import org.apache.http.nio.client.HttpAsyncClient;
 import org.apache.http.nio.reactor.IOReactorException;
 
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -25,52 +24,48 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class DemoClient {
 
-    public static final AtomicInteger counter = new AtomicInteger(3);
+    public static final AtomicInteger counter = new AtomicInteger();
 
     public static void main(String[] args) throws InterruptedException, IOReactorException {
         startServer();
 
         TimeUnit.SECONDS.sleep(10); // should be enough for the Spring Boot app to start
 
-        startClient1();
-        startClient2();
-        startClient3();
+        Map<String, CloseableHttpAsyncClient> clients = new HashMap<>();
+        clients.put("Client: default", defaultClient());
+        clients.put("Client: customCM, default ioReactor", customCM_defaultReactorClient());
+        clients.put("Client: customCM, custom ioReactor", customCM_customReactorClient());
+
+        clients.forEach((k, v) -> {
+            invoke(k, v, "Post: no timeout", post());
+            invoke(k, v, "Post: with timeout", postWithTimeout());
+        });
     }
 
-    private static void startClient1() {
-        String name = "Default_config";
-        CloseableHttpAsyncClient httpAsyncClient = HttpAsyncClients.createDefault();
-        invoke(httpAsyncClient, name);
+    private static CloseableHttpAsyncClient defaultClient() {
+        return HttpAsyncClients.createDefault();
     }
 
-    private static void startClient2() throws IOReactorException {
-        String name = "Config_with_custom_connection_manager_and_default_ioReactor";
-
+    private static CloseableHttpAsyncClient customCM_defaultReactorClient() throws IOReactorException {
         DefaultConnectingIOReactor ioReactor = new DefaultConnectingIOReactor();
         PoolingNHttpClientConnectionManager connectionManager = new PoolingNHttpClientConnectionManager(ioReactor);
 
-        CloseableHttpAsyncClient httpAsyncClient = HttpAsyncClients.custom()
-                                                                   .setConnectionManager(connectionManager)
-                                                                   .build();
-
-        invoke(httpAsyncClient, name);
+        return HttpAsyncClients.custom()
+                               .setConnectionManager(connectionManager)
+                               .build();
     }
 
-    private static void startClient3() throws IOReactorException {
-        String name = "Config_with_custom_connection_manager_and_custom_ioReactor";
-
+    private static CloseableHttpAsyncClient customCM_customReactorClient() throws IOReactorException {
         IOReactorConfig ioReactorConfig = IOReactorConfig.custom()
-                                                   .setSelectInterval(100)
-                                                   .setConnectTimeout(1000)
-                                                   .setSoTimeout(5000)
-                                                   .build();
+                                                         .setSelectInterval(100)
+                                                         .setConnectTimeout(1000)
+                                                         .setSoTimeout(5000)
+                                                         .build();
         DefaultConnectingIOReactor ioReactor = new DefaultConnectingIOReactor(ioReactorConfig);
         PoolingNHttpClientConnectionManager connectionManager = new PoolingNHttpClientConnectionManager(ioReactor);
-        CloseableHttpAsyncClient httpAsyncClient = HttpAsyncClients.custom()
-                                                                   .setConnectionManager(connectionManager)
-                                                                   .build();
-
-        invoke(httpAsyncClient, name);
+        return HttpAsyncClients.custom()
+                               .setConnectionManager(connectionManager)
+                               .build();
     }
 
     private static void startServer() {
@@ -78,23 +73,28 @@ public class DemoClient {
         server.start();
     }
 
-    private static void invoke(CloseableHttpAsyncClient httpAsyncClient, String name){
+    private static void invoke(String clientName, CloseableHttpAsyncClient httpAsyncClient, String postName, HttpPost post) {
+        int i = counter.incrementAndGet();
+        System.out.println("Started " + i + " requests");
+        String name = clientName + " | " + postName;
         new Thread(() -> {
             httpAsyncClient.start();
-            httpAsyncClient.execute(post(name), callback(name));
+            httpAsyncClient.execute(post, callback(name));
         }).start();
     }
 
-    private static HttpPost post(String name){
-        HttpPost request = new HttpPost("http://localhost:8080/test/");
-        URIBuilder builder = new URIBuilder(request.getURI());
-        builder.addParameter("name", name);
-        try {
-            URI uri = builder.build();
-            request.setURI(uri);
-        } catch (URISyntaxException e) {
-            e.printStackTrace();
-        }
+    private static HttpPost post() {
+        return new HttpPost("http://localhost:8080/test/");
+    }
+
+    private static HttpPost postWithTimeout() {
+        RequestConfig config = RequestConfig.custom()
+                                            .setConnectTimeout(100)
+                                            .setSocketTimeout(100)
+                                            .setConnectionRequestTimeout(1000)
+                                            .build();
+        HttpPost request = post();
+        request.setConfig(config);
         return request;
     }
 
@@ -110,12 +110,16 @@ public class DemoClient {
                 if (details.length > 0) {
                     System.out.println("Details: " + Arrays.asList(details));
                 }
+                System.out.println();
             }
 
             private void maybeExit() {
-                if (counter.decrementAndGet() <= 0) {
+                int i = counter.decrementAndGet();
+                if (i <= 0) {
+                    System.out.println("All requests completed, exiting");
                     System.exit(0);
                 }
+                System.out.println(i + " requests remaining");
             }
 
             @Override
